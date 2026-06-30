@@ -50,7 +50,6 @@ for idx, entry in enumerate(entries):
         sgv_mmol = round(sgv_mgdl / 18.0, 1)
         date_str = entry.get("dateString")
         if date_str:
-            # Парсим время и оставляем только часы:минуты
             try:
                 dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 time_str = dt.strftime("%H:%M")
@@ -82,7 +81,6 @@ for t in treatments:
     if details:
         formatted_treatments.append(f"{time_str} | {t_type}: {', '.join(details)}")
 
-# Собираем финальный текст для отправки нейросети
 data_summary = (
     "### ЛОГ ГЛЮКОЗЫ ЗА СУТКИ (ммоль/л):\n" + "\n".join(formatted_glucose) + "\n\n"
     "### ВВЕДЕННЫЙ ИНСУЛИН И ЕДА ЗА СУТКИ:\n" + "\n".join(formatted_treatments)
@@ -117,12 +115,15 @@ payload = {
     "temperature": 0.3
 }
 
+# Отправляем запрос и детально выводим ошибки
 try:
     r_groq = requests.post(groq_url, json=payload, headers=groq_headers)
-    r_groq.raise_for_status()
-    analysis = r_groq.json()["choices"][0]["message"]["content"]
+    if r_groq.status_code != 200:
+        analysis = f"Ошибка при вызове ИИ (Код {r_groq.status_code}):\n{r_groq.text}"
+    else:
+        analysis = r_groq.json()["choices"][0]["message"]["content"]
 except Exception as e:
-    analysis = f"Ошибка при вызове ИИ: {e}"
+    analysis = f"Критическая ошибка скрипта: {e}"
 
 # 6. Отправка отчета в Telegram
 tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
