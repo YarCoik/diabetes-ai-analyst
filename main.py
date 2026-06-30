@@ -13,7 +13,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL") or "llama-3.3-70b-versatile"
 
 ns_url = NIGHTSCOUT_URL.rstrip('/')
 
-# Хешируем API_SECRET в SHA-1 для авторизации
+# Base URL для запросов
 hashed_secret = hashlib.sha1(NIGHTSCOUT_API_SECRET.encode('utf-8')).hexdigest()
 
 # Настраиваем заголовки запроса
@@ -80,13 +80,14 @@ for idx, entry in enumerate(entries):
         epoch_ms = entry.get("date")
         if epoch_ms:
             try:
+                # Переводим миллисекунды в дату UTC и добавляем 5 часов (для Екатеринбурга UTC+5)
                 dt = datetime.utcfromtimestamp(epoch_ms / 1000.0) + timedelta(hours=5)
                 time_str = dt.strftime("%H:%M")
                 formatted_glucose.append(f"{time_str} - {sgv_mmol} ммоль/л")
             except Exception as e:
-                print(f"Ошибка конвертации времени: {e}")
+                print(f"Ошибка конвертации времени сахара: {e}")
 
-# 5. Форматирование уколов, еды и текстовых заметок
+# 5. Форматирование уколов, еды и текстовых заметок с поправкой времени
 formatted_treatments = []
 for t in treatments:
     t_type = t.get("eventType", "Запись")
@@ -96,13 +97,20 @@ for t in treatments:
     created_at = t.get("created_at")
     
     time_str = ""
-    epoch_ms = t.get("date")
-    if epoch_ms:
+    if created_at:
         try:
-            dt = datetime.utcfromtimestamp(epoch_ms / 1000.0) + timedelta(hours=5)
-            time_str = dt.strftime("%H:%M")
-        except:
-            pass
+            # Обрезаем миллисекунды (берем первые 19 символов "YYYY-MM-DDTHH:MM:SS")
+            clean_date = created_at[:19]
+            dt_utc = datetime.strptime(clean_date, "%Y-%m-%dT%H:%M:%S")
+            # Если время в UTC (оканчивается на Z или содержит +00), добавляем 5 часов для Екатеринбурга
+            if "Z" in created_at or "+00" in created_at:
+                dt_local = dt_utc + timedelta(hours=5)
+            else:
+                dt_local = dt_utc
+            time_str = dt_local.strftime("%H:%M")
+        except Exception as e:
+            print(f"Ошибка парсинга времени укола: {e}")
+            time_str = created_at[11:16] if len(created_at) > 16 else ""
 
     details = []
     if carbs: details.append(f"Еда: {carbs}г углеводов")
@@ -138,6 +146,7 @@ system_instruction = (
     "1. <b>📊 СТАТИСТИКА ДНЯ</b>: Средний сахар в ммоль/л, Мин, Макс, время в целевом диапазоне.\n"
     "2. <b>💉 АНАЛИЗ БОЛЮСОВ И ЕДЫ</b>: Если в логах есть записи о введении инсулина (болюсах) и еде (углеводах), подробно проанализируй их. "
     "Оцени, насколько правильно компенсировалась еда (углеводный коэффициент К1), были ли сильные пики после еды или резкие падения (гипогликемия). "
+    "Обязательно привязывай уколы ко времени на графике сахара.\n"
     "Если записей о еде и уколах за сутки нет, просто напиши кратко: 'Записей об уколах и еде за сутки не обнаружено'.\n"
     "3. <b>💡 КОРРЕКТИРОВКА БАЗАЛА</b>: Предложения по корректировке базального профиля на основе суточных колебаний глюкозы.\n\n"
     "КРАЙНЕ ВАЖНОЕ ТРЕБОВАНИЕ К ТАБЛИЦЕ И ЦИФРАМ:\n"
