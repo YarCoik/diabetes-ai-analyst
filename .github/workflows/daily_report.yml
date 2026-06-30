@@ -2,11 +2,8 @@ name: Daily Diabetes AI Report
 
 on:
   schedule:
-    # Запуск каждый день в 17:00 UTC (это 22:00 по времени Екатеринбурга UTC+5)
-    # Если захочешь изменить время, просто поменяй '0 17 * * *' (формат Cron в UTC)
     - cron: '0 17 * * *'
   workflow_dispatch:
-    # Это позволит запускать скрипт вручную кнопкой на сайте в любой момент для теста
 
 jobs:
   run-analyst:
@@ -14,10 +11,10 @@ jobs:
 
     steps:
     - name: Checkout Repository Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
