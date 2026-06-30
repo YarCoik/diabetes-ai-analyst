@@ -8,7 +8,7 @@ NIGHTSCOUT_API_SECRET = os.environ.get("NIGHTSCOUT_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.environ.get("OPENAI_API_KEY")
-LLM_MODEL = os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_MODEL = os.environ.get("LLM_MODEL") or "llama-3.3-70b-versatile"
 
 ns_url = NIGHTSCOUT_URL.rstrip('/')
 
@@ -27,6 +27,8 @@ except Exception as e:
     print(f"Ошибка при получении сахаров: {e}")
     entries = []
 
+print(f"Успешно получено сахаров из Nightscout: {len(entries)} шт.")
+
 # 2. Запрос введенного инсулина и еды за последние сутки
 yesterday = (datetime.utcnow() - timedelta(days=1)).isoformat()
 treatments_url = f"{ns_url}/api/v1/treatments.json?find[created_at][$gte]={yesterday}"
@@ -38,6 +40,8 @@ except Exception as e:
     print(f"Ошибка при получении доз и еды: {e}")
     treatments = []
 
+print(f"Успешно получено процедур лечения из Nightscout: {len(treatments)} шт.")
+
 # 3. Форматирование данных для ИИ
 formatted_glucose = []
 entries.reverse() # Разворачиваем, чтобы время шло от прошлого к настоящему
@@ -46,16 +50,18 @@ for idx, entry in enumerate(entries):
     # Берем каждую 3-ю запись (раз в 15 минут), чтобы не раздувать текст для ИИ
     if idx % 3 == 0:
         sgv_mgdl = entry.get("sgv", 0)
-        # Переводим в ммоль/л
         sgv_mmol = round(sgv_mgdl / 18.0, 1)
-        date_str = entry.get("dateString")
-        if date_str:
+        
+        # Железный разбор времени по Unix-таймстампу
+        epoch_ms = entry.get("date")
+        if epoch_ms:
             try:
-                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                # Переводим миллисекунды в дату UTC и добавляем 5 часов (для Екатеринбурга UTC+5)
+                dt = datetime.utcfromtimestamp(epoch_ms / 1000.0) + timedelta(hours=5)
                 time_str = dt.strftime("%H:%M")
                 formatted_glucose.append(f"{time_str} - {sgv_mmol} ммоль/л")
-            except:
-                pass
+            except Exception as e:
+                print(f"Ошибка конвертации времени для точки сахара: {e}")
 
 formatted_treatments = []
 for t in treatments:
@@ -66,9 +72,11 @@ for t in treatments:
     created_at = t.get("created_at")
     
     time_str = ""
-    if created_at:
+    # Для процедур также используем таймстамп
+    epoch_ms = t.get("date")
+    if epoch_ms:
         try:
-            dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            dt = datetime.utcfromtimestamp(epoch_ms / 1000.0) + timedelta(hours=5)
             time_str = dt.strftime("%H:%M")
         except:
             pass
@@ -80,6 +88,10 @@ for t in treatments:
     
     if details:
         formatted_treatments.append(f"{time_str} | {t_type}: {', '.join(details)}")
+
+print(f"Отформатировано точек сахара для отправки в ИИ: {len(formatted_glucose)} шт.")
+if formatted_glucose:
+    print(f"Пример первой точки сахара: {formatted_glucose[0]}")
 
 data_summary = (
     "### ЛОГ ГЛЮКОЗЫ ЗА СУТКИ (ммоль/л):\n" + "\n".join(formatted_glucose) + "\n\n"
