@@ -13,7 +13,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL") or "llama-3.3-70b-versatile"
 
 ns_url = NIGHTSCOUT_URL.rstrip('/')
 
-# Хешируем API_SECRET в SHA-1 (это критически важно для авторизации в API Nightscout!)
+# Хешируем API_SECRET в SHA-1 для авторизации
 hashed_secret = hashlib.sha1(NIGHTSCOUT_API_SECRET.encode('utf-8')).hexdigest()
 
 # Настраиваем заголовки запроса
@@ -22,9 +22,29 @@ headers = {
     "Accept": "application/json"
 }
 
-# 1. Запрос логов сахара (последние 288 точек = примерно 24 часа)
-entries_url = f"{ns_url}/api/v1/entries/sgv.json?count=288"
+# 1. Запрос активного профиля базала из Найтскаута (то, что мы заполняли на сайте)
+profile_url = f"{ns_url}/api/v1/profile.json"
+active_basal_rates = []
 
+try:
+    r_profile = requests.get(profile_url, headers=headers)
+    r_profile.raise_for_status()
+    profiles = r_profile.json()
+    if profiles:
+        latest_profile = profiles[0]
+        default_profile_name = latest_profile.get("defaultProfile", "Default")
+        store = latest_profile.get("store", {})
+        profile_data = store.get(default_profile_name, {})
+        basal_list = profile_data.get("basal", [])
+        for b in basal_list:
+            active_basal_rates.append(f"{b.get('time')} | {b.get('value')} ед/ч")
+except Exception as e:
+    print(f"Ошибка при получении профиля базала: {e}")
+
+print(f"Успешно получено точек базала из твоего профиля: {len(active_basal_rates)} шт.")
+
+# 2. Запрос логов сахара (последние 288 точек = примерно 24 часа)
+entries_url = f"{ns_url}/api/v1/entries/sgv.json?count=288"
 try:
     r_entries = requests.get(entries_url, headers=headers)
     r_entries.raise_for_status()
@@ -35,7 +55,7 @@ except Exception as e:
 
 print(f"Успешно получено сахаров из Nightscout: {len(entries)} шт.")
 
-# 2. Запрос введенного инсулина и еды за последние сутки
+# 3. Запрос введенного инсулина, еды и заметок за последние сутки
 yesterday = (datetime.utcnow() - timedelta(days=1)).isoformat()
 treatments_url = f"{ns_url}/api/v1/treatments.json?find[created_at][$gte]={yesterday}"
 try:
@@ -46,29 +66,27 @@ except Exception as e:
     print(f"Ошибка при получении доз и еды: {e}")
     treatments = []
 
-print(f"Успешно получено процедур лечения из Nightscout: {len(treatments)} шт.")
+print(f"Успешно получено процедур лечения/заметок: {len(treatments)} шт.")
 
-# 3. Форматирование данных для ИИ
+# 4. Форматирование данных сахара для ИИ
 formatted_glucose = []
-entries.reverse() # Разворачиваем, чтобы время шло от прошлого к настоящему
+entries.reverse()
 
 for idx, entry in enumerate(entries):
-    # Берем каждую 3-ю запись (раз в 15 минут), чтобы не раздувать текст для ИИ
     if idx % 3 == 0:
         sgv_mgdl = entry.get("sgv", 0)
         sgv_mmol = round(sgv_mgdl / 18.0, 1)
         
-        # Разбор времени по Unix-таймстампу
         epoch_ms = entry.get("date")
         if epoch_ms:
             try:
-                # Переводим миллисекунды в дату UTC и добавляем 5 часов (для Екатеринбурга UTC+5)
                 dt = datetime.utcfromtimestamp(epoch_ms / 1000.0) + timedelta(hours=5)
                 time_str = dt.strftime("%H:%M")
                 formatted_glucose.append(f"{time_str} - {sgv_mmol} ммоль/л")
             except Exception as e:
-                print(f"Ошибка конвертации времени для точки сахара: {e}")
+                print(f"Ошибка конвертации времени: {e}")
 
+# 5. Форматирование уколов, еды и текстовых заметок
 formatted_treatments = []
 for t in treatments:
     t_type = t.get("eventType", "Запись")
@@ -94,19 +112,21 @@ for t in treatments:
     if details:
         formatted_treatments.append(f"{time_str} | {t_type}: {', '.join(details)}")
 
-print(f"Отформатировано точек сахара для отправки в ИИ: {len(formatted_glucose)} шт.")
-if formatted_glucose:
-    print(f"Пример первой точки сахара: {formatted_glucose[0]}")
+# Собираем данные в единый пакет
+basal_profile_text = "\n".join(active_basal_rates) if active_basal_rates else "Базальный профиль в Найтскауте не заполнен."
+glucose_text = "\n".join(formatted_glucose) if formatted_glucose else "Нет данных сахара."
+treatments_text = "\n".join(formatted_treatments) if formatted_treatments else "Нет записей о еде/инсулине/заметках за сутки."
 
 data_summary = (
-    "### ЛОГ ГЛЮКОЗЫ ЗА СУТКИ (ммоль/л):\n" + "\n".join(formatted_glucose) + "\n\n"
-    "### ВВЕДЕННЫЙ ИНСУЛИН И ЕДА ЗА СУТКИ:\n" + "\n".join(formatted_treatments)
+    "### ТЕКУЩИЙ АКТИВНЫЙ БАЗАЛЬНЫЙ ПРОФИЛЬ ПАЦИЕНТА НА ПОМПЕ:\n" + basal_profile_text + "\n\n"
+    "### ЛОГ ГЛЮКОЗЫ ЗА СУТКИ (ммоль/л):\n" + glucose_text + "\n\n"
+    "### ВВЕДЕННЫЙ ИНСУЛИН, ЕДА И ЗАМЕТКИ ЗА СУТКИ:\n" + treatments_text
 )
 
-# 4. Формируем инструкцию для нейросети
+# 6. Формируем инструкцию для нейросети
 system_instruction = (
     "Ты — профессиональный врач-эндокринолог, эксперт по анализу данных помп и CGM. "
-    "Проанализируй суточный график сахара пациента и его текущие дозировки. "
+    "Проанализируй суточный график сахара пациента, его текстовые заметки о событиях (спорт, стресс, еда) и его текущий профиль базала. "
     "Напиши детальный отчет строго на русском языке в дружелюбном, но очень профессиональном стиле. "
     "ВАЖНОЕ ТРЕБОВАНИЕ К ФОРМАТИРОВАНИЮ ДЛЯ TELEGRAM:\n"
     "Текст отправляется в Telegram с parse_mode='HTML'. Тебе КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать маркдаун (решетки #, звездочки *).\n"
@@ -116,18 +136,20 @@ system_instruction = (
     "- Для примечаний используй курсив: <i>курсивный текст</i>.\n\n"
     "Для сравнительной таблицы базального инсулина ты ОБЯЗАН обернуть её в тег <pre>...</pre>. "
     "Это принудительно сделает шрифт моноширинным, и таблица будет идеально ровной на экранах любых телефонов.\n"
-    "Выравнивай столбцы пробелами. Пример оформления таблицы:\n"
+    "В таблице должно быть строго три колонки: Время, Текущий и Новый. Колонку 'Изменение' выводить НЕ нужно.\n"
+    "Выравнивай столбцы пробелами. В таблице сравнивай именно предоставленный ТЕКУЩИЙ профиль базала с твоим новым ПРЕДЛАГАЕМЫМ.\n"
+    "Пример оформления таблицы базала:\n"
     "<pre>\n"
-    "Время | Текущий | Новый | Изменение\n"
-    "-----------------------------------\n"
-    "00:00 |  0.550  | 0.550 | --\n"
-    "04:00 |  0.900  | 0.950 | 📈 +0.05\n"
-    "16:00 |  0.750  | 0.800 | 📈 +0.05\n"
+    "Время | Текущий | Новый\n"
+    "-----------------------\n"
+    "00:00 |  0.550  | 0.550\n"
+    "04:00 |  0.900  | 0.950\n"
+    "16:00 |  0.750  | 0.800\n"
     "</pre>\n\n"
     "В конце отчета обязательно добавь дисклеймер, что это лишь рекомендация ИИ и любые изменения нужно согласовать с лечащим врачом (оформи его курсивом <i>...</i>)."
 )
 
-# 5. Делаем запрос к API Groq
+# 7. Делаем запрос к API Groq
 groq_url = "https://api.groq.com/openai/v1/chat/completions"
 groq_headers = {
     "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -137,12 +159,11 @@ payload = {
     "model": LLM_MODEL,
     "messages": [
         {"role": "system", "content": system_instruction},
-        {"role": "user", "content": f"Вот мои данные сахара и инсулина за последние 24 часа:\n{data_summary}"}
+        {"role": "user", "content": f"Вот мои данные сахара, уколов и текущего базального профиля за последние 24 часа:\n{data_summary}"}
     ],
     "temperature": 0.3
 }
 
-# Отправляем запрос и детально выводим ошибки
 try:
     r_groq = requests.post(groq_url, json=payload, headers=groq_headers)
     if r_groq.status_code != 200:
@@ -152,12 +173,12 @@ try:
 except Exception as e:
     analysis = f"Критическая ошибка скрипта: {e}"
 
-# 6. Отправка отчета в Telegram
+# 8. Отправка отчета в Telegram
 tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 tg_payload = {
     "chat_id": TELEGRAM_CHAT_ID,
     "text": analysis,
-    "parse_mode": "HTML"  # МЕНЯЕМ НА HTML!
+    "parse_mode": "HTML"
 }
 try:
     r_tg = requests.post(tg_url, json=tg_payload)
